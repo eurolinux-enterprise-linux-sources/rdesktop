@@ -1,20 +1,18 @@
 Name:           rdesktop
-Version:        1.6.0
-Release:        10%{?dist}
+Version:        1.7.1
+Release:        1%{?dist}
 Summary:        X client for remote desktop into Windows Terminal Server
 
 Group:          User Interface/Desktops
-License:        GPLv2+
+License:        GPLv3+
 URL:            http://www.rdesktop.org/
 Source0:        %{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:  openssl-devel, libX11-devel, pcsc-lite-devel, libao-devel
 Requires:	pcsc-lite
-Patch0:		remote-file-access.patch
-Patch1:		rdesktop-1.6.0-ts2008-licence.patch
-Patch2:		rdesktop-1.6.0-cursor.patch
-Patch3:		rdesktop-1.6.0-smart-card-lp64.patch
-Patch4:		rdesktop-1.6.0-scard-crash.patch
+Patch0:		rdesktop-1.7.1-scard-crash.patch
+Patch1:		rdesktop-1.7.1-wts2008-reinitsec.patch
+Patch2:		rdesktop-1.7.1-wts2008-loadbalance.patch
 
 %description
 rdesktop is an open source client for Windows NT Terminal Server and
@@ -24,11 +22,9 @@ desktop. Unlike Citrix ICA, no server extensions are required.
 
 %prep
 %setup -q
-%patch0 -p0 -b .remote-file-access
-%patch1 -p1 -b .ts2008-licence
-%patch2 -p1 -b .cursor
-%patch3 -p1 -b .lp64
-%patch4 -p1 -b .crash
+%patch0 -p1 -b .crash
+%patch1 -p1 -b .reinit
+%patch2 -p1 -b .load-balance
 
 %build
 %configure --with-ipv6 --with-sound=libao --enable-smartcard
@@ -49,6 +45,12 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/*
 
 %changelog
+* Mon Jun 24 2013 Soren Sandmann <ssp@redhat.com> 1.7.1-1
+- Rebase to 1.7.1 (#852890, #902912, #914279)
+- Add patches from 
+    http://sourceforge.net/p/rdesktop/patches/214/
+  to rework redirect PDU handling (#701246)
+
 * Wed Aug 22 2012 Adam Jackson <ajax@redhat.com> 1.6.0-10
 - Don't Require: libao-devel at runtime (#820008)
 - rdesktop-1.6.0-ts2008-licence.patch: Fix licence handling against some
