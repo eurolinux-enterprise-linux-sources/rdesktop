@@ -1,6 +1,6 @@
 Name:           rdesktop
 Version:        1.6.0
-Release:        8%{?dist}.1
+Release:        10%{?dist}
 Summary:        X client for remote desktop into Windows Terminal Server
 
 Group:          User Interface/Desktops
@@ -9,8 +9,12 @@ URL:            http://www.rdesktop.org/
 Source0:        %{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:  openssl-devel, libX11-devel, pcsc-lite-devel, libao-devel
-Requires:	pcsc-lite, libao-devel
+Requires:	pcsc-lite
 Patch0:		remote-file-access.patch
+Patch1:		rdesktop-1.6.0-ts2008-licence.patch
+Patch2:		rdesktop-1.6.0-cursor.patch
+Patch3:		rdesktop-1.6.0-smart-card-lp64.patch
+Patch4:		rdesktop-1.6.0-scard-crash.patch
 
 %description
 rdesktop is an open source client for Windows NT Terminal Server and
@@ -21,6 +25,10 @@ desktop. Unlike Citrix ICA, no server extensions are required.
 %prep
 %setup -q
 %patch0 -p0 -b .remote-file-access
+%patch1 -p1 -b .ts2008-licence
+%patch2 -p1 -b .cursor
+%patch3 -p1 -b .lp64
+%patch4 -p1 -b .crash
 
 %build
 %configure --with-ipv6 --with-sound=libao --enable-smartcard
@@ -41,6 +49,16 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/*
 
 %changelog
+* Wed Aug 22 2012 Adam Jackson <ajax@redhat.com> 1.6.0-10
+- Don't Require: libao-devel at runtime (#820008)
+- rdesktop-1.6.0-ts2008-licence.patch: Fix licence handling against some
+  versions of Terminal Services. (#831095)
+- rdesktop-1.6.0-cursor.patch: Fix cursor rendering for Windows Server 2008
+  (#782494)
+- rdesktop-1.6.0-smart-card-lp64.patch: Fix smartcard support on 64-bit
+  hosts (#772020, #680917)
+- rdesktop-1.6.0-scard-crash.patch: Fix a crash in smartcard support (#680926)
+
 * Mon May 9 2011 Soren Sandmann <ssp@redhat.com> - 1.6.0-8.1
 - Prevent remote file access (#676252)
 

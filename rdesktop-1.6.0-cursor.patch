@@ -1,0 +1,553 @@
+diff -up rdesktop-1.6.0/constants.h.jx rdesktop-1.6.0/constants.h
+--- rdesktop-1.6.0/constants.h.jx	2008-04-02 07:13:21.000000000 -0400
++++ rdesktop-1.6.0/constants.h	2012-08-22 16:44:55.619618246 -0400
+@@ -149,7 +149,9 @@ enum RDP_POINTER_PDU_TYPE
+ 	RDP_POINTER_SYSTEM = 1,
+ 	RDP_POINTER_MOVE = 3,
+ 	RDP_POINTER_COLOR = 6,
+-	RDP_POINTER_CACHED = 7
++	RDP_POINTER_CACHED = 7,
++    RDP_POINTER_NEW = 8
++
+ };
+ 
+ enum RDP_SYSTEM_POINTER_TYPE
+@@ -244,6 +246,10 @@ enum RDP_INPUT_DEVICE
+ 
+ #define RDP_CAPSET_POINTER	8
+ #define RDP_CAPLEN_POINTER	0x08
++#define RDP_CAPLEN_NEWPOINTER   0x0a
++
++#define RDP_CAPSET_BRUSHCACHE   15
++#define RDP_CAPLEN_BRUSHCACHE   0x08
+ 
+ #define RDP_CAPSET_SHARE	9
+ #define RDP_CAPLEN_SHARE	0x08
+diff -up rdesktop-1.6.0/proto.h.jx rdesktop-1.6.0/proto.h
+--- rdesktop-1.6.0/proto.h.jx	2008-04-02 07:13:22.000000000 -0400
++++ rdesktop-1.6.0/proto.h	2012-08-22 16:44:55.620618238 -0400
+@@ -246,8 +246,7 @@ void ui_paint_bitmap(int x, int y, int c
+ void ui_destroy_bitmap(RD_HBITMAP bmp);
+ RD_HGLYPH ui_create_glyph(int width, int height, uint8 * data);
+ void ui_destroy_glyph(RD_HGLYPH glyph);
+-RD_HCURSOR ui_create_cursor(unsigned int x, unsigned int y, int width, int height, uint8 * andmask,
+-			    uint8 * xormask);
++RD_HCURSOR ui_create_cursor(unsigned int x, unsigned int y, int width, int height, uint8 * andmask, uint8 * xormask, int bpp);
+ void ui_set_cursor(RD_HCURSOR cursor);
+ void ui_destroy_cursor(RD_HCURSOR cursor);
+ void ui_set_null_cursor(void);
+diff -up rdesktop-1.6.0/rdp.c.jx rdesktop-1.6.0/rdp.c
+--- rdesktop-1.6.0/rdp.c.jx	2008-02-14 06:37:17.000000000 -0500
++++ rdesktop-1.6.0/rdp.c	2012-08-22 16:44:55.621618230 -0400
+@@ -778,6 +778,27 @@ rdp_out_pointer_caps(STREAM s)
+ 	out_uint16_le(s, 20);	/* Cache size */
+ }
+ 
++/* Output new pointer capability set */
++static void
++rdp_out_newpointer_caps(STREAM s)
++{
++    out_uint16_le(s, RDP_CAPSET_POINTER);
++    out_uint16_le(s, RDP_CAPLEN_NEWPOINTER);
++
++    out_uint16_le(s, 1);    /* Colour pointer */
++    out_uint16_le(s, 20);   /* Cache size */
++    out_uint16_le(s, 20);   /* Cache size for new pointers */
++}
++
++/* Output brush cache capability set */
++static void
++rdp_out_brushcache_caps(STREAM s)
++{
++    out_uint16_le(s, RDP_CAPSET_BRUSHCACHE);
++    out_uint16_le(s, RDP_CAPLEN_BRUSHCACHE);
++    out_uint32_le(s, 1);    /* cache type */
++}
++
+ /* Output share capability set */
+ static void
+ rdp_out_share_caps(STREAM s)
+@@ -846,12 +867,21 @@ rdp_send_confirm_active(void)
+ 	uint32 sec_flags = g_encryption ? (RDP5_FLAG | SEC_ENCRYPT) : RDP5_FLAG;
+ 	uint16 caplen =
+ 		RDP_CAPLEN_GENERAL + RDP_CAPLEN_BITMAP + RDP_CAPLEN_ORDER +
+-		RDP_CAPLEN_BMPCACHE + RDP_CAPLEN_COLCACHE +
++		RDP_CAPLEN_COLCACHE +
+ 		RDP_CAPLEN_ACTIVATE + RDP_CAPLEN_CONTROL +
+-		RDP_CAPLEN_POINTER + RDP_CAPLEN_SHARE +
+-		0x58 + 0x08 + 0x08 + 0x34 /* unknown caps */  +
++		RDP_CAPLEN_SHARE +
++		RDP_CAPLEN_BRUSHCACHE + 0x58 + 0x08 + 0x08 + 0x34 /* unknown caps */  +
+ 		4 /* w2k fix, why? */ ;
+-
++    if (g_use_rdp5)
++    {
++        caplen += RDP_CAPLEN_BMPCACHE2;
++        caplen += RDP_CAPLEN_NEWPOINTER;
++    }
++    else
++    {
++        caplen += RDP_CAPLEN_BMPCACHE;
++        caplen += RDP_CAPLEN_POINTER;
++    }
+ 	s = sec_init(sec_flags, 6 + 14 + caplen + sizeof(RDP_SOURCE));
+ 
+ 	out_uint16_le(s, 2 + 14 + caplen + sizeof(RDP_SOURCE));
+@@ -864,18 +894,27 @@ rdp_send_confirm_active(void)
+ 	out_uint16_le(s, caplen);
+ 
+ 	out_uint8p(s, RDP_SOURCE, sizeof(RDP_SOURCE));
+-	out_uint16_le(s, 0xd);	/* num_caps */
++	out_uint16_le(s, 0xe);	/* num_caps */
+ 	out_uint8s(s, 2);	/* pad */
+ 
+ 	rdp_out_general_caps(s);
+ 	rdp_out_bitmap_caps(s);
+ 	rdp_out_order_caps(s);
+-	g_use_rdp5 ? rdp_out_bmpcache2_caps(s) : rdp_out_bmpcache_caps(s);
++	if (g_use_rdp5)
++    {
++		rdp_out_bmpcache2_caps(s);
++		rdp_out_newpointer_caps(s);
++	}
++	else
++	{
++        rdp_out_bmpcache_caps(s);
++		rdp_out_pointer_caps(s);
++	}
+ 	rdp_out_colcache_caps(s);
+ 	rdp_out_activate_caps(s);
+ 	rdp_out_control_caps(s);
+-	rdp_out_pointer_caps(s);
+ 	rdp_out_share_caps(s);
++    rdp_out_brushcache_caps(s);
+ 
+ 	rdp_out_unknown_caps(s, 0x0d, 0x58, caps_0x0d);	/* international? */
+ 	rdp_out_unknown_caps(s, 0x0c, 0x08, caps_0x0c);
+@@ -1011,26 +1050,53 @@ process_demand_active(STREAM s)
+ 	reset_order_state();
+ }
+ 
++static void
++process_colour_pointer_common(STREAM s, int bpp)
++{
++    uint16 width, height, cache_idx, masklen, datalen;
++    sint16 x, y;
++    uint8 *mask;
++    uint8 *data;
++    RD_HCURSOR cursor;
++
++    in_uint16_le(s, cache_idx);
++    in_uint16_le(s, x);
++    in_uint16_le(s, y);
++    in_uint16_le(s, width);
++    in_uint16_le(s, height);
++    in_uint16_le(s, masklen);
++    in_uint16_le(s, datalen);
++    in_uint8p(s, data, datalen);
++    in_uint8p(s, mask, masklen);
++    if ((width != 32) || (height != 32))
++    {
++        warning("process_colour_pointer_common: " "width %d height %d\n", width, height);
++    }
++    /* sometimes x or y is out of bounds */
++    x = MAX(x, 0);
++    x = MIN(x, width - 1);
++    y = MAX(y, 0);
++    y = MIN(y, height - 1);
++    cursor = ui_create_cursor(x, y, width, height, mask, data, bpp);
++    ui_set_cursor(cursor);
++    cache_put_cursor(cache_idx, cursor);
++}
++
+ /* Process a colour pointer PDU */
+ void
+ process_colour_pointer_pdu(STREAM s)
+ {
+-	uint16 x, y, width, height, cache_idx, masklen, datalen;
+-	uint8 *mask, *data;
+-	RD_HCURSOR cursor;
++    process_colour_pointer_common(s, 24);
++}
+ 
+-	in_uint16_le(s, cache_idx);
+-	in_uint16_le(s, x);
+-	in_uint16_le(s, y);
+-	in_uint16_le(s, width);
+-	in_uint16_le(s, height);
+-	in_uint16_le(s, masklen);
+-	in_uint16_le(s, datalen);
+-	in_uint8p(s, data, datalen);
+-	in_uint8p(s, mask, masklen);
+-	cursor = ui_create_cursor(x, y, width, height, mask, data);
+-	ui_set_cursor(cursor);
+-	cache_put_cursor(cache_idx, cursor);
++/* Process a New Pointer PDU - these pointers have variable bit depth */
++void
++process_new_pointer_pdu(STREAM s)
++{
++    int xor_bpp;
++
++    in_uint16_le(s, xor_bpp);
++    process_colour_pointer_common(s, xor_bpp);
+ }
+ 
+ /* Process a cached pointer PDU */
+@@ -1092,6 +1158,10 @@ process_pointer_pdu(STREAM s)
+ 			process_system_pointer_pdu(s);
+ 			break;
+ 
++        case RDP_POINTER_NEW:
++            process_new_pointer_pdu(s);
++            break;
++
+ 		default:
+ 			unimpl("Pointer message 0x%x\n", message_type);
+ 	}
+diff -up rdesktop-1.6.0/types.h.jx rdesktop-1.6.0/types.h
+--- rdesktop-1.6.0/types.h.jx	2007-01-07 23:47:06.000000000 -0500
++++ rdesktop-1.6.0/types.h	2012-08-22 16:44:55.621618230 -0400
+@@ -79,13 +79,22 @@ typedef struct _PEN
+ }
+ PEN;
+ 
++/* this is whats in the brush cache */
++typedef struct _BRUSHDATA
++{
++	uint32 colour_code;
++	uint32 data_size;
++	uint8 *data;
++}
++BRUSHDATA;
++
+ typedef struct _BRUSH
+ {
+ 	uint8 xorigin;
+ 	uint8 yorigin;
+ 	uint8 style;
+ 	uint8 pattern[8];
+-
++	BRUSHDATA *bd;
+ }
+ BRUSH;
+ 
+diff -up rdesktop-1.6.0/xwin.c.jx rdesktop-1.6.0/xwin.c
+--- rdesktop-1.6.0/xwin.c.jx	2008-05-11 02:14:38.000000000 -0400
++++ rdesktop-1.6.0/xwin.c	2012-08-22 16:44:55.623618214 -0400
+@@ -1965,7 +1965,6 @@ static void
+ get_window_attribs(XSetWindowAttributes * attribs)
+ {
+ 	attribs->background_pixel = BlackPixelOfScreen(g_screen);
+-	attribs->background_pixel = WhitePixelOfScreen(g_screen);
+ 	attribs->border_pixel = WhitePixelOfScreen(g_screen);
+ 	attribs->backing_store = g_ownbackstore ? NotUseful : Always;
+ 	attribs->override_redirect = g_fullscreen;
+@@ -2099,7 +2098,7 @@ ui_create_window(void)
+ 
+ 	/* create invisible 1x1 cursor to be used as null cursor */
+ 	if (g_null_cursor == NULL)
+-		g_null_cursor = ui_create_cursor(0, 0, 1, 1, null_pointer_mask, null_pointer_data);
++		g_null_cursor = ui_create_cursor(0, 0, 1, 1, null_pointer_mask, null_pointer_data, 24);
+ 
+ 	if (g_seamless_rdp)
+ 	{
+@@ -2770,9 +2769,62 @@ ui_destroy_glyph(RD_HGLYPH glyph)
+ 	XFreePixmap(g_display, (Pixmap) glyph);
+ }
+ 
++/* convert next pixel to 32 bpp */
++static int
++get_next_xor_pixel(uint8 * xormask, int bpp, int *k)
++{
++	int rv = 0;
++	PixelColour pc;
++	uint8 *s8;
++	uint16 *s16;
++
++	switch (bpp)
++	{
++		case 1:
++			s8 = xormask + (*k) / 8;
++			rv = (*s8) & (0x80 >> ((*k) % 8));
++			rv = rv ? 0xffffff : 0;
++			(*k) += 1;
++			break;
++		case 8:
++			s8 = xormask + *k;
++			/* should use colour map */
++			rv = s8[0];
++			rv = rv ? 0xffffff : 0;
++			(*k) += 1;
++			break;
++		case 15:
++			s16 = (uint16 *) xormask;
++			SPLITCOLOUR15(s16[*k], pc);
++			rv = (pc.red << 16) | (pc.green << 8) | pc.blue;
++			(*k) += 1;
++			break;
++		case 16:
++			s16 = (uint16 *) xormask;
++			SPLITCOLOUR16(s16[*k], pc);
++			rv = (pc.red << 16) | (pc.green << 8) | pc.blue;
++			(*k) += 1;
++			break;
++		case 24:
++			s8 = xormask + *k;
++			rv = (s8[0] << 16) | (s8[1] << 8) | s8[2];
++			(*k) += 3;
++			break;
++		case 32:
++			s8 = xormask + *k;
++			rv = (s8[1] << 16) | (s8[2] << 8) | s8[3];
++			(*k) += 4;
++			break;
++		default:
++			error("unknown bpp in get_next_xor_pixel %d\n", bpp);
++			break;
++	}
++	return rv;
++}
++
+ RD_HCURSOR
+ ui_create_cursor(unsigned int x, unsigned int y, int width, int height,
+-		 uint8 * andmask, uint8 * xormask)
++		 uint8 * andmask, uint8 * xormask, int bpp)
+ {
+ 	RD_HGLYPH maskglyph, cursorglyph;
+ 	XColor bg, fg;
+@@ -2780,22 +2832,31 @@ ui_create_cursor(unsigned int x, unsigne
+ 	uint8 *cursor, *pcursor;
+ 	uint8 *mask, *pmask;
+ 	uint8 nextbit;
+-	int scanline, offset;
+-	int i, j;
++	int scanline, offset, delta;
++	int i, j, k;
+ 
++    k = 0;
+ 	scanline = (width + 7) / 8;
+ 	offset = scanline * height;
+ 
+ 	cursor = (uint8 *) xmalloc(offset);
+ 	memset(cursor, 0, offset);
+ 
+-	mask = (uint8 *) xmalloc(offset);
++    mask = (uint8 *) xmalloc(offset);
+ 	memset(mask, 0, offset);
+-
++	if (bpp == 1)
++	{
++		offset = 0;
++		delta = scanline;
++	}
++	else
++	{
++		offset = scanline * height - scanline;
++		delta = -scanline;
++	}
+ 	/* approximate AND and XOR masks with a monochrome X pointer */
+ 	for (i = 0; i < height; i++)
+ 	{
+-		offset -= scanline;
+ 		pcursor = &cursor[offset];
+ 		pmask = &mask[offset];
+ 
+@@ -2803,7 +2864,7 @@ ui_create_cursor(unsigned int x, unsigne
+ 		{
+ 			for (nextbit = 0x80; nextbit != 0; nextbit >>= 1)
+ 			{
+-				if (xormask[0] || xormask[1] || xormask[2])
++				if (get_next_xor_pixel(xormask, bpp, &k))
+ 				{
+ 					*pcursor |= (~(*andmask) & nextbit);
+ 					*pmask |= nextbit;
+@@ -2813,14 +2874,13 @@ ui_create_cursor(unsigned int x, unsigne
+ 					*pcursor |= ((*andmask) & nextbit);
+ 					*pmask |= (~(*andmask) & nextbit);
+ 				}
+-
+-				xormask += 3;
+ 			}
+ 
+ 			andmask++;
+ 			pcursor++;
+ 			pmask++;
+ 		}
++		offset += delta;
+ 	}
+ 
+ 	fg.red = fg.blue = fg.green = 0xffff;
+@@ -3070,18 +3130,45 @@ ui_patblt(uint8 opcode,
+ 			break;
+ 
+ 		case 3:	/* Pattern */
+-			for (i = 0; i != 8; i++)
+-				ipattern[7 - i] = brush->pattern[i];
+-			fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
+-			SET_FOREGROUND(bgcolour);
+-			SET_BACKGROUND(fgcolour);
+-			XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
+-			XSetStipple(g_display, g_gc, fill);
+-			XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
+-			FILL_RECTANGLE_BACKSTORE(x, y, cx, cy);
+-			XSetFillStyle(g_display, g_gc, FillSolid);
+-			XSetTSOrigin(g_display, g_gc, 0, 0);
+-			ui_destroy_glyph((RD_HGLYPH) fill);
++			if (brush->bd == 0)	/* rdp4 brush */
++			{
++				for (i = 0; i != 8; i++)
++					ipattern[7 - i] = brush->pattern[i];
++				fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_RECTANGLE_BACKSTORE(x, y, cx, cy);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
++			else if (brush->bd->colour_code > 1)	/* > 1 bpp */
++			{
++				fill = (Pixmap) ui_create_bitmap(8, 8, brush->bd->data);
++				XSetFillStyle(g_display, g_gc, FillTiled);
++				XSetTile(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_RECTANGLE_BACKSTORE(x, y, cx, cy);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_bitmap((RD_HBITMAP) fill);
++			}
++			else
++			{
++				fill = (Pixmap) ui_create_glyph(8, 8, brush->bd->data);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_RECTANGLE_BACKSTORE(x, y, cx, cy);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
+ 			break;
+ 
+ 		default:
+@@ -3244,18 +3331,45 @@ ui_polygon(uint8 opcode,
+ 			break;
+ 
+ 		case 3:	/* Pattern */
+-			for (i = 0; i != 8; i++)
+-				ipattern[7 - i] = brush->pattern[i];
+-			fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
+-			SET_FOREGROUND(bgcolour);
+-			SET_BACKGROUND(fgcolour);
+-			XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
+-			XSetStipple(g_display, g_gc, fill);
+-			XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
+-			FILL_POLYGON((XPoint *) point, npoints);
+-			XSetFillStyle(g_display, g_gc, FillSolid);
+-			XSetTSOrigin(g_display, g_gc, 0, 0);
+-			ui_destroy_glyph((RD_HGLYPH) fill);
++			if (brush->bd == 0)	/* rdp4 brush */
++			{
++				for (i = 0; i != 8; i++)
++					ipattern[7 - i] = brush->pattern[i];
++				fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_POLYGON((XPoint *) point, npoints);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
++			else if (brush->bd->colour_code > 1)	/* > 1 bpp */
++			{
++				fill = (Pixmap) ui_create_bitmap(8, 8, brush->bd->data);
++				XSetFillStyle(g_display, g_gc, FillTiled);
++				XSetTile(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_POLYGON((XPoint *) point, npoints);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_bitmap((RD_HBITMAP) fill);
++			}
++			else
++			{
++				fill = (Pixmap) ui_create_glyph(8, 8, brush->bd->data);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				FILL_POLYGON((XPoint *) point, npoints);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
+ 			break;
+ 
+ 		default:
+@@ -3322,18 +3436,45 @@ ui_ellipse(uint8 opcode,
+ 			break;
+ 
+ 		case 3:	/* Pattern */
+-			for (i = 0; i != 8; i++)
+-				ipattern[7 - i] = brush->pattern[i];
+-			fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
+-			SET_FOREGROUND(bgcolour);
+-			SET_BACKGROUND(fgcolour);
+-			XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
+-			XSetStipple(g_display, g_gc, fill);
+-			XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
+-			DRAW_ELLIPSE(x, y, cx, cy, fillmode);
+-			XSetFillStyle(g_display, g_gc, FillSolid);
+-			XSetTSOrigin(g_display, g_gc, 0, 0);
+-			ui_destroy_glyph((RD_HGLYPH) fill);
++			if (brush->bd == 0)	/* rdp4 brush */
++			{
++				for (i = 0; i != 8; i++)
++					ipattern[7 - i] = brush->pattern[i];
++				fill = (Pixmap) ui_create_glyph(8, 8, ipattern);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				DRAW_ELLIPSE(x, y, cx, cy, fillmode);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
++			else if (brush->bd->colour_code > 1)	/* > 1 bpp */
++			{
++				fill = (Pixmap) ui_create_bitmap(8, 8, brush->bd->data);
++				XSetFillStyle(g_display, g_gc, FillTiled);
++				XSetTile(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				DRAW_ELLIPSE(x, y, cx, cy, fillmode);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_bitmap((RD_HBITMAP) fill);
++			}
++			else
++			{
++				fill = (Pixmap) ui_create_glyph(8, 8, brush->bd->data);
++				SET_FOREGROUND(bgcolour);
++				SET_BACKGROUND(fgcolour);
++				XSetFillStyle(g_display, g_gc, FillOpaqueStippled);
++				XSetStipple(g_display, g_gc, fill);
++				XSetTSOrigin(g_display, g_gc, brush->xorigin, brush->yorigin);
++				DRAW_ELLIPSE(x, y, cx, cy, fillmode);
++				XSetFillStyle(g_display, g_gc, FillSolid);
++				XSetTSOrigin(g_display, g_gc, 0, 0);
++				ui_destroy_glyph((RD_HGLYPH) fill);
++			}
+ 			break;
+ 
+ 		default:

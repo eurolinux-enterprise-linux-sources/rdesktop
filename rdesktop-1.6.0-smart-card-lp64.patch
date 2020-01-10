@@ -1,0 +1,399 @@
+diff -up rdesktop-1.6.0/scard.c.jx rdesktop-1.6.0/scard.c
+--- rdesktop-1.6.0/scard.c.jx	2012-08-22 16:52:44.967799084 -0400
++++ rdesktop-1.6.0/scard.c	2012-08-22 16:52:52.534737368 -0400
+@@ -236,70 +236,6 @@ scard_enum_devices(uint32 * id, char *op
+ }
+ 
+ #ifndef MAKE_PROTO
+-/* ---------------------------------- */
+-
+-/* These two functions depend heavily on the actual implementation of the smart
+- * card handle in PC/SC Lite 1.3.1. Here are the salient bits:
+- *
+- * From winscard.c:331, in SCardConnect:
+- *         *phCard = RFCreateReaderHandle(rContext);
+- *
+- * RFCreateReaderHandle (readerfactory.c:1161) creates a random short (16-bit
+- * integer) and makes sure it's unique. Then it adds it to
+- * rContext->dwIdentity.
+- *
+- * From readerfactory.c:173, in RFAddReader:
+- *         (sReadersContexts[dwContext])->dwIdentity =
+- *               (dwContext + 1) << (sizeof(DWORD) / 2) * 8;
+- *
+- * dwContext must be less than PCSCLITE_MAX_READERS_CONTEXTS, which is defined
+- * to be 16 in the 1.3.1 release. 
+- *
+- * The use of "(sizeof(DWORD) / 2) * 8" is what makes conversion necessary in
+- * order to use 64-bit card handles when talking to PC/SC Lite, and 32-bit card
+- * handles when talking with the server, without losing any data: a card handle
+- * made by a 32-bit PC/SC Lite looks like 0x00014d32, where the 4d32 is the
+- * random 16 bits, 01 is the reader context index + 1, and it's left-shifted by 
+- * 16 bits (sizeof(DWORD) == 4, divided by 2 is 2, times 8 is 16.) But a 64-bit
+- * PC/SC Lite makes a card handle that looks like 0x0000000100004d32. The
+- * reader context index+1 is left-shifted 32 bits because sizeof(DWORD) is 8,
+- * not 4. This means the handle won't fit in 32 bits. (The multiplication by 8
+- * is because sizeofs are in bytes, but saying how many places to left-shift is
+- * speaking in bits.)
+- *
+- * So then. Maximum value of dwContext+1 is 17; we'll say this fits in a byte
+- * to be loose and have plenty of room. This is then left-shifted by
+- * sizeof(DWORD) / 2 * 8 - which in this file is sizeof(MYPCSC_DWORD) / 2 * 8.
+- *
+- * At any rate, if we take the handle as passed from PC/SC Lite, right-shift by
+- * sizeof(MYPCSC_DWORD) / 2, left-shift by sizeof(SERVER_DWORD) / 2, and add
+- * the lower two bytes of the value (the random number), we can fit all the
+- * information into 32 bits without losing any. Of course, any time we want to
+- * hand that back to PC/SC Lite, we'll have to expand it again. (And if
+- * sizeof(MYPCSC_DWORD) == sizeof(SERVER_DWORD), we're essentially doing
+- * nothing, which will not break anything.)
+- *
+- *
+- * - jared.jennings@eglin.af.mil, 2 Aug 2006
+- */
+-
+-
+-static MYPCSC_SCARDHANDLE
+-scHandleToMyPCSC(SERVER_SCARDHANDLE server)
+-{
+-	return (((MYPCSC_SCARDHANDLE) server >> (sizeof(SERVER_DWORD) * 8 / 2) & 0xffff)
+-		<< (sizeof(MYPCSC_DWORD) * 8 / 2)) + (server & 0xffff);
+-}
+-
+-static SERVER_SCARDHANDLE
+-scHandleToServer(MYPCSC_SCARDHANDLE mypcsc)
+-{
+-	return ((mypcsc >> (sizeof(MYPCSC_DWORD) * 8 / 2) & 0xffff)
+-		<< (sizeof(SERVER_DWORD) * 8 / 2)) + (mypcsc & 0xffff);
+-}
+-
+-/* ---------------------------------- */
+-
+ static void *
+ SC_xmalloc(PMEM_HANDLE * memHandle, unsigned int size)
+ {
+@@ -778,8 +714,7 @@ TS_SCardConnect(STREAM in, STREAM out, R
+ 	char *szReader;
+ 	SERVER_DWORD dwShareMode;
+ 	SERVER_DWORD dwPreferredProtocol;
+-	MYPCSC_SCARDHANDLE myHCard;
+-	SERVER_SCARDHANDLE hCard;
++	SCARDHANDLE hCard;
+ 
+ 	MYPCSC_DWORD dwActiveProtocol;
+ 	PMEM_HANDLE lcHandle = NULL;
+@@ -792,8 +727,7 @@ TS_SCardConnect(STREAM in, STREAM out, R
+ 	in_uint32_le(in, hContext);
+ 	DEBUG_SCARD(("SCARD: SCardConnect(context: 0x%08x, share: 0x%08x, proto: 0x%08x, reader: \"%s\")\n", (unsigned) hContext, (unsigned) dwShareMode, (unsigned) dwPreferredProtocol, szReader ? szReader : "NULL"));
+ 	rv = SCardConnect(hContext, szReader, (MYPCSC_DWORD) dwShareMode,
+-			  (MYPCSC_DWORD) dwPreferredProtocol, &myHCard, &dwActiveProtocol);
+-	hCard = scHandleToServer(myHCard);
++			  (MYPCSC_DWORD) dwPreferredProtocol, &hCard, &dwActiveProtocol);
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+ 		DEBUG_SCARD(("SCARD: -> Failure: %s (0x%08x)\n",
+@@ -802,8 +736,7 @@ TS_SCardConnect(STREAM in, STREAM out, R
+ 	else
+ 	{
+ 		char *szVendor = getVendor(szReader);
+-		DEBUG_SCARD(("SCARD: -> Success (hcard: 0x%08x [0x%08lx])\n",
+-			     (unsigned) hCard, (unsigned long) myHCard));
++		DEBUG_SCARD(("SCARD: -> Success (hcard: 0x%08x)\n",  (unsigned) hCard));
+ 		if (szVendor && (strlen(szVendor) > 0))
+ 		{
+ 			DEBUG_SCARD(("SCARD: Set Attribute ATTR_VENDOR_NAME\n"));
+@@ -846,8 +779,7 @@ TS_SCardReconnect(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+ 	SCARDCONTEXT hContext;
+-	SERVER_SCARDHANDLE hCard;
+-	MYPCSC_SCARDHANDLE myHCard;
++	SCARDHANDLE hCard;
+ 	SERVER_DWORD dwShareMode;
+ 	SERVER_DWORD dwPreferredProtocol;
+ 	SERVER_DWORD dwInitialization;
+@@ -861,9 +793,8 @@ TS_SCardReconnect(STREAM in, STREAM out)
+ 	in_uint32_le(in, hContext);
+ 	in->p += 0x04;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+-	DEBUG_SCARD(("SCARD: SCardReconnect(context: 0x%08x, hcard: 0x%08x [0x%08lx], share: 0x%08x, proto: 0x%08x, init: 0x%08x)\n", (unsigned) hContext, (unsigned) hCard, (unsigned long) myHCard, (unsigned) dwShareMode, (unsigned) dwPreferredProtocol, (unsigned) dwInitialization));
+-	rv = SCardReconnect(myHCard, (MYPCSC_DWORD) dwShareMode, (MYPCSC_DWORD) dwPreferredProtocol,
++	DEBUG_SCARD(("SCARD: SCardReconnect(context: 0x%08x, hcard: 0x%08x, share: 0x%08x, proto: 0x%08x, init: 0x%08x)\n", (unsigned) hContext, (unsigned) hCard, (unsigned) dwShareMode, (unsigned) dwPreferredProtocol, (unsigned) dwInitialization));
++	rv = SCardReconnect(hCard, (MYPCSC_DWORD) dwShareMode, (MYPCSC_DWORD) dwPreferredProtocol,
+ 			    (MYPCSC_DWORD) dwInitialization, &dwActiveProtocol);
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+@@ -885,8 +816,7 @@ TS_SCardDisconnect(STREAM in, STREAM out
+ {
+ 	MYPCSC_DWORD rv;
+ 	SERVER_SCARDCONTEXT hContext;
+-	SERVER_SCARDHANDLE hCard;
+-	MYPCSC_SCARDHANDLE myHCard;
++	SCARDHANDLE hCard;
+ 	SERVER_DWORD dwDisposition;
+ 
+ 	in->p += 0x20;
+@@ -917,8 +847,7 @@ TS_SCardDisconnect(STREAM in, STREAM out
+ 	}
+ 	pthread_mutex_unlock(&hcardAccess);
+ 
+-	myHCard = scHandleToMyPCSC(hCard);
+-	rv = SCardDisconnect(myHCard, (MYPCSC_DWORD) dwDisposition);
++	rv = SCardDisconnect(hCard, (MYPCSC_DWORD) dwDisposition);
+ 
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+@@ -1356,15 +1285,12 @@ static DWORD
+ TS_SCardBeginTransaction(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 
+ 	in->p += 0x30;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+-	DEBUG_SCARD(("SCARD: SCardBeginTransaction(hcard: 0x%08x [0x%08lx])\n",
+-		     (unsigned) hCard, (unsigned long) myHCard));
+-	rv = SCardBeginTransaction(myHCard);
++	DEBUG_SCARD(("SCARD: SCardBeginTransaction(hcard: 0x%08x)\n",(unsigned) hCard));
++	rv = SCardBeginTransaction(hCard);
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+ 		DEBUG_SCARD(("SCARD: -> Failure: %s (0x%08x)\n",
+@@ -1382,23 +1308,20 @@ static DWORD
+ TS_SCardEndTransaction(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_DWORD dwDisposition = 0;
+ 
+ 	in->p += 0x20;
+ 	in_uint32_le(in, dwDisposition);
+ 	in->p += 0x0C;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+ 	DEBUG_SCARD(("[hCard = 0x%.8x]\n", (unsigned int) hCard));
+-	DEBUG_SCARD(("[myHCard = 0x%016lx]\n", (unsigned long) myHCard));
+ 	DEBUG_SCARD(("[dwDisposition = 0x%.8x]\n", (unsigned int) dwDisposition));
+ 
+-	DEBUG_SCARD(("SCARD: SCardEndTransaction(hcard: 0x%08x [0x%08lx], disposition: 0x%08x)\n",
+-		     (unsigned) hCard, (unsigned long) myHCard, (unsigned) dwDisposition));
+-	rv = SCardEndTransaction(myHCard, (MYPCSC_DWORD) dwDisposition);
++	DEBUG_SCARD(("SCARD: SCardEndTransaction(hcard: 0x%08x, disposition: 0x%08x)\n",
++		     (unsigned) hCard, (unsigned) dwDisposition));
++	rv = SCardEndTransaction(hCard, (MYPCSC_DWORD) dwDisposition);
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+ 		DEBUG_SCARD(("SCARD: -> Failure: %s (0x%08x)\n",
+@@ -1447,8 +1370,7 @@ TS_SCardTransmit(STREAM in, STREAM out)
+ 	MYPCSC_DWORD rv;
+ 	SERVER_DWORD map[7], linkedLen;
+ 	void *tmp;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_LPSCARD_IO_REQUEST pioSendPci, pioRecvPci;
+ 	MYPCSC_LPSCARD_IO_REQUEST myPioSendPci, myPioRecvPci;
+ 	unsigned char *sendBuf = NULL, *recvBuf = NULL;
+@@ -1475,7 +1397,6 @@ TS_SCardTransmit(STREAM in, STREAM out)
+ 
+ 	in->p += 0x04;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+ 	if (map[2] & INPUT_LINKED)
+ 	{
+@@ -1541,7 +1462,7 @@ TS_SCardTransmit(STREAM in, STREAM out)
+ 	else
+ 		pioRecvPci = NULL;
+ 
+-	DEBUG_SCARD(("SCARD: SCardTransmit(hcard: 0x%08x [0x%08lx], send: %d bytes, recv: %d bytes)\n", (unsigned) hCard, (unsigned long) myHCard, (int) cbSendLength, (int) cbRecvLength));
++	DEBUG_SCARD(("SCARD: SCardTransmit(hcard: 0x%08x, send: %d bytes, recv: %d bytes)\n", (unsigned) hCard, (int) cbSendLength, (int) cbRecvLength));
+ 
+ 	myCbRecvLength = cbRecvLength;
+ 	myPioSendPci = SC_xmalloc(&lcHandle,
+@@ -1565,7 +1486,7 @@ TS_SCardTransmit(STREAM in, STREAM out)
+ 	{
+ 		myPioRecvPci = NULL;
+ 	}
+-	rv = SCardTransmit(myHCard, myPioSendPci, sendBuf, (MYPCSC_DWORD) cbSendLength,
++	rv = SCardTransmit(hCard, myPioSendPci, sendBuf, (MYPCSC_DWORD) cbSendLength,
+ 			   myPioRecvPci, recvBuf, &myCbRecvLength);
+ 	cbRecvLength = myCbRecvLength;
+ 
+@@ -1629,8 +1550,7 @@ static MYPCSC_DWORD
+ TS_SCardStatus(STREAM in, STREAM out, RD_BOOL wide)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_DWORD dwState = 0, dwProtocol = 0, dwReaderLen, dwAtrLen;
+ 	MYPCSC_DWORD state, protocol, readerLen, atrLen;
+ 	SERVER_DWORD dataLength;
+@@ -1644,9 +1564,8 @@ TS_SCardStatus(STREAM in, STREAM out, RD
+ 	in->p += 0x0C;
+ 	in_uint32_le(in, hCard);
+ 	in->p += 0x04;
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+-	DEBUG_SCARD(("SCARD: SCardStatus(hcard: 0x%08x [0x%08lx], reader len: %d bytes, atr len: %d bytes)\n", (unsigned) hCard, (unsigned long) myHCard, (int) dwReaderLen, (int) dwAtrLen));
++	DEBUG_SCARD(("SCARD: SCardStatus(hcard: 0x%08x, reader len: %d bytes, atr len: %d bytes)\n", (unsigned) hCard, (int) dwReaderLen, (int) dwAtrLen));
+ 
+ 	if (dwReaderLen <= 0 || dwReaderLen == SCARD_AUTOALLOCATE || dwReaderLen > SCARD_MAX_MEM)
+ 		dwReaderLen = SCARD_MAX_MEM;
+@@ -1674,7 +1593,7 @@ TS_SCardStatus(STREAM in, STREAM out, RD
+ 	protocol = dwProtocol;
+ 	readerLen = dwReaderLen;
+ 	atrLen = dwAtrLen;
+-	rv = SCardStatus(myHCard, readerName, &readerLen, &state, &protocol, atr, &atrLen);
++	rv = SCardStatus(hCard, readerName, &readerLen, &state, &protocol, atr, &atrLen);
+ 	dwAtrLen = atrLen;
+ 	dwReaderLen = readerLen;
+ 	dwProtocol = protocol;
+@@ -1755,8 +1674,7 @@ static MYPCSC_DWORD
+ TS_SCardState(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_DWORD dwState = 0, dwProtocol = 0, dwReaderLen, dwAtrLen;
+ 	MYPCSC_DWORD state, protocol, readerLen, atrLen;
+ 	PMEM_HANDLE lcHandle = NULL;
+@@ -1768,10 +1686,9 @@ TS_SCardState(STREAM in, STREAM out)
+ 	in->p += 0x0C;
+ 	in_uint32_le(in, hCard);
+ 	in->p += 0x04;
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+-	DEBUG_SCARD(("SCARD: SCardState(hcard: 0x%08x [0x%08lx], atr len: %d bytes)\n",
+-		     (unsigned) hCard, (unsigned long) myHCard, (int) dwAtrLen));
++	DEBUG_SCARD(("SCARD: SCardState(hcard: 0x%08x, atr len: %d bytes)\n",
++		     (unsigned) hCard, (int) dwAtrLen));
+ 
+ 	dwReaderLen = SCARD_MAX_MEM;
+ 	if (dwAtrLen <= 0 || dwAtrLen == SCARD_AUTOALLOCATE || dwAtrLen > SCARD_MAX_MEM)
+@@ -1789,7 +1706,7 @@ TS_SCardState(STREAM in, STREAM out)
+ 	protocol = dwProtocol;
+ 	readerLen = dwReaderLen;
+ 	atrLen = dwAtrLen;
+-	rv = SCardStatus(myHCard, readerName, &readerLen, &state, &protocol, atr, &atrLen);
++	rv = SCardStatus(hCard, readerName, &readerLen, &state, &protocol, atr, &atrLen);
+ 	dwAtrLen = atrLen;
+ 	dwReaderLen = readerLen;
+ 	dwProtocol = protocol;
+@@ -1916,8 +1833,7 @@ static MYPCSC_DWORD
+ TS_SCardGetAttrib(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_DWORD dwAttrId, dwAttrLen;
+ 	MYPCSC_DWORD attrLen;
+ 	unsigned char *pbAttr;
+@@ -1929,13 +1845,11 @@ TS_SCardGetAttrib(STREAM in, STREAM out)
+ 	in_uint32_le(in, dwAttrLen);
+ 	in->p += 0x0C;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+ 	dwAttrId = dwAttrId & 0x0000FFFF;
+ 
+-	DEBUG_SCARD(("SCARD: SCardGetAttrib(hcard: 0x%08x [0x%08lx], attrib: 0x%08x (%d bytes))\n",
+-		     (unsigned) hCard, (unsigned long) myHCard,
+-		     (unsigned) dwAttrId, (int) dwAttrLen));
++	DEBUG_SCARD(("SCARD: SCardGetAttrib(hcard: 0x%08x, attrib: 0x%08x (%d bytes))\n",
++		     (unsigned) hCard,  (unsigned) dwAttrId, (int) dwAttrLen));
+ 
+ 	if (dwAttrLen > MAX_BUFFER_SIZE)
+ 		dwAttrLen = MAX_BUFFER_SIZE;
+@@ -1956,7 +1870,7 @@ TS_SCardGetAttrib(STREAM in, STREAM out)
+ 	}
+ 
+ 	attrLen = dwAttrLen;
+-	rv = SCardGetAttrib(myHCard, (MYPCSC_DWORD) dwAttrId, pbAttr, &attrLen);
++	rv = SCardGetAttrib(hCard, (MYPCSC_DWORD) dwAttrId, pbAttr, &attrLen);
+ 	dwAttrLen = attrLen;
+ 
+ 	if (dwAttrId == 0x00000100 && rv != SCARD_S_SUCCESS)
+@@ -2011,8 +1925,7 @@ static MYPCSC_DWORD
+ TS_SCardSetAttrib(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+-	SERVER_SCARDCONTEXT hCard;
+-	MYPCSC_SCARDCONTEXT myHCard;
++	SCARDCONTEXT hCard;
+ 	SERVER_DWORD dwAttrId;
+ 	SERVER_DWORD dwAttrLen;
+ 	unsigned char *pbAttr;
+@@ -2024,13 +1937,11 @@ TS_SCardSetAttrib(STREAM in, STREAM out)
+ 	in_uint32_le(in, dwAttrLen);
+ 	in->p += 0x0C;
+ 	in_uint32_le(in, hCard);
+-	myHCard = scHandleToMyPCSC(hCard);
+ 
+ 	dwAttrId = dwAttrId & 0x0000FFFF;
+ 
+-	DEBUG_SCARD(("SCARD: SCardSetAttrib(hcard: 0x%08x [0x%08lx], attrib: 0x%08x (%d bytes))\n",
+-		     (unsigned) hCard, (unsigned long) myHCard,
+-		     (unsigned) dwAttrId, (int) dwAttrLen));
++	DEBUG_SCARD(("SCARD: SCardSetAttrib(hcard: 0x%08x, attrib: 0x%08x (%d bytes))\n",
++		     (unsigned) hCard, (unsigned) dwAttrId, (int) dwAttrLen));
+ 
+ 	if (dwAttrLen > MAX_BUFFER_SIZE)
+ 		dwAttrLen = MAX_BUFFER_SIZE;
+@@ -2040,7 +1951,7 @@ TS_SCardSetAttrib(STREAM in, STREAM out)
+ 		return SC_returnNoMemoryError(&lcHandle, in, out);
+ 
+ 	in_uint8a(in, pbAttr, dwAttrLen);
+-	rv = SCardSetAttrib(myHCard, (MYPCSC_DWORD) dwAttrId, pbAttr, (MYPCSC_DWORD) dwAttrLen);
++	rv = SCardSetAttrib(hCard, (MYPCSC_DWORD) dwAttrId, pbAttr, (MYPCSC_DWORD) dwAttrLen);
+ 
+ 	if (rv != SCARD_S_SUCCESS)
+ 	{
+@@ -2068,8 +1979,7 @@ TS_SCardControl(STREAM in, STREAM out)
+ {
+ 	MYPCSC_DWORD rv;
+ 	SERVER_SCARDCONTEXT hContext;
+-	SERVER_SCARDHANDLE hCard;
+-	MYPCSC_SCARDHANDLE myHCard;
++	SCARDHANDLE hCard;
+ 	SERVER_DWORD map[3];
+ 	SERVER_DWORD dwControlCode;
+ 	unsigned char *pInBuffer, *pOutBuffer;
+@@ -2122,12 +2032,11 @@ TS_SCardControl(STREAM in, STREAM out)
+ 	DEBUG_SCARD(("SCARD: SCardControl(context: 0x%08x, hcard: 0x%08x, code: 0x%08x, in: %d bytes, out: %d bytes)\n", (unsigned) hContext, (unsigned) hCard, (unsigned) dwControlCode, (int) nInBufferSize, (int) nOutBufferSize));
+ 
+ 	sc_nBytesReturned = nBytesReturned;
+-	myHCard = scHandleToMyPCSC(hCard);
+ #ifdef WITH_PCSC120
+-	rv = SCardControl(myHCard, pInBuffer, (MYPCSC_DWORD) nInBufferSize, pOutBuffer,
++	rv = SCardControl(hCard, pInBuffer, (MYPCSC_DWORD) nInBufferSize, pOutBuffer,
+ 			  &sc_nBytesReturned);
+ #else
+-	rv = SCardControl(myHCard, (MYPCSC_DWORD) dwControlCode, pInBuffer,
++	rv = SCardControl(hCard, (MYPCSC_DWORD) dwControlCode, pInBuffer,
+ 			  (MYPCSC_DWORD) nInBufferSize, pOutBuffer,
+ 			  (MYPCSC_DWORD) nOutBufferRealSize, &sc_nBytesReturned);
+ #endif
+diff -up rdesktop-1.6.0/scard.h.jx rdesktop-1.6.0/scard.h
+--- rdesktop-1.6.0/scard.h.jx	2007-10-30 09:09:37.000000000 -0400
++++ rdesktop-1.6.0/scard.h	2012-08-22 16:52:52.534737368 -0400
+@@ -47,9 +47,7 @@ typedef DWORD MYPCSC_DWORD;
+ typedef uint32_t SERVER_DWORD;
+ 
+ typedef SCARDCONTEXT MYPCSC_SCARDCONTEXT;
+-typedef SCARDHANDLE MYPCSC_SCARDHANDLE;
+ typedef uint32_t SERVER_SCARDCONTEXT;
+-typedef uint32_t SERVER_SCARDHANDLE;
+ 
+ typedef SCARD_READERSTATE_A MYPCSC_SCARD_READERSTATE_A;
+ typedef LPSCARD_READERSTATE_A MYPCSC_LPSCARD_READERSTATE_A;
